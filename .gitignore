@@ -1,0 +1,18 @@
+# Dataset
+datasets/
+train/
+my_train/
+my_val/
+train_sources.csv
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Notebook / editor
+.ipynb_checkpoints/
+.vscode/
+.idea/
+.DS_Store
