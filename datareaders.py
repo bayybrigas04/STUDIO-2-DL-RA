@@ -1,228 +1,147 @@
-# DATA READERS 
-
-import os
+import argparse
 import random
+import shutil
+from pathlib import Path
+
 import numpy as np
 import torch
 from PIL import Image
-from pathlib import Path
+from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader, Subset
 from torchvision import datasets, transforms as T
-from sklearn.model_selection import train_test_split
 
-# 1. KONFIGURASI
+# Validasi memakai get_transform() dari submission/model.py supaya preprocessing
+# saat training SAMA dengan saat evaluate.py menilai model.
+from submission.model import IMG_SIZE, MEAN, STD, get_transform
+
 SEED = 42
-IMG_SIZE = 224
 BATCH_SIZE = 32
 NUM_WORKERS = 2
-TRAIN_RATIO = 0.8
+VAL_RATIO = 0.2  # 80% train, 20% validasi
 
-DATA_DIR = Path("/content/drive/MyDrive/Datasets/train")
-
-CLASSES = [
-    "botol_plastik",
-    "gelas_plastik",
-    "kertas_kardus",
-    "saset_kemasan",
-    "styrofoam"
-]
-
+CLASSES = ["botol_plastik", "gelas_plastik", "kertas_kardus", "saset_kemasan", "styrofoam"]
 EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 
-# 2. RANDOM SEED
-random.seed(SEED)
-np.random.seed(SEED)
-torch.manual_seed(SEED)
 
-if torch.cuda.is_available():
-    torch.cuda.manual_seed_all(SEED)
+def set_seed(seed=SEED):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
-# 3. CEK DATASET
-print("=" * 55)
-print("MEMERIKSA DATASET")
-print("=" * 55)
 
-if not DATA_DIR.is_dir():
-    raise FileNotFoundError(
-        f"Folder dataset tidak ditemukan: {DATA_DIR}\n"
-        "Pastikan Google Drive sudah di-mount."
-    )
+def get_train_transform():
+    """Augmentasi untuk data training saja."""
+    return T.Compose([
+        T.RandomResizedCrop(IMG_SIZE, scale=(0.8, 1.0)),
+        T.RandomHorizontalFlip(p=0.5),
+        T.RandomRotation(degrees=15),
+        T.ToTensor(),
+        T.Normalize(MEAN, STD),
+    ])
 
-for class_name in CLASSES:
-    class_path = DATA_DIR / class_name
-    if not class_path.is_dir():
-        raise FileNotFoundError(
-            f"Folder kelas tidak ditemukan: {class_path}"
-        )
 
-# 4. TRANSFORMASI GAMBAR
-train_transform = T.Compose([
-    T.RandomResizedCrop(
-        IMG_SIZE, scale=(0.8, 1.0)
-    ),
-    T.RandomHorizontalFlip(p=0.5),
-    T.RandomRotation(degrees=15),
-    T.ToTensor(),
-    T.Normalize(
-        mean=[0.485, 0.456, 0.406],
-        std=[0.229, 0.224, 0.225]
-    )
-])
+def check_images(data_dir):
+    """Periksa folder kelas dan gambar. Kembalikan (path_valid, path_rusak)."""
+    data_dir = Path(data_dir)
+    if not data_dir.is_dir():
+        raise FileNotFoundError(f"Folder dataset tidak ditemukan: {data_dir}")
+    valid, invalid = [], []
+    for name in CLASSES:
+        class_dir = data_dir / name
+        if not class_dir.is_dir():
+            raise FileNotFoundError(f"Folder kelas tidak ditemukan: {class_dir}")
+        for p in sorted(class_dir.rglob("*")):
+            if not p.is_file() or p.suffix.lower() not in EXTENSIONS:
+                continue
+            try:
+                with Image.open(p) as img:
+                    img.verify()
+                valid.append(p)
+            except Exception:
+                invalid.append(p)
+    if not valid:
+        raise ValueError("Tidak ditemukan gambar valid di dataset.")
+    return valid, invalid
 
-val_transform = T.Compose([
-    T.Resize((IMG_SIZE, IMG_SIZE)),
-    T.ToTensor(),
-    T.Normalize(
-        mean=[0.485, 0.456, 0.406],
-        std=[0.229, 0.224, 0.225]
-    )
-])
 
-# 5. MEMBACA DAN MEMERIKSA GAMBAR
-print("\nMemuat gambar...")
+def get_data(data_dir, batch_size=BATCH_SIZE, num_workers=NUM_WORKERS,
+             val_ratio=VAL_RATIO, seed=SEED, verbose=True):
+    """Bangun DataLoader train & validasi dari folder berisi 5 folder kelas."""
+    set_seed(seed)
+    valid, invalid = check_images(data_dir)
+    valid_set = {str(p.resolve()) for p in valid}
+    is_valid = lambda path: str(Path(path).resolve()) in valid_set  # buang gambar rusak
 
-# ImageFolder otomatis memberikan label berdasarkan folder kelas.
-# Gambar yang rusak diperiksa terlebih dahulu.
+    # Dua dataset di folder yang sama, beda transform (agar validasi tidak diaugmentasi)
+    train_all = datasets.ImageFolder(data_dir, get_train_transform(), is_valid_file=is_valid)
+    val_all = datasets.ImageFolder(data_dir, get_transform(), is_valid_file=is_valid)
 
-valid_extensions = EXTENSIONS
-valid_images = []
-invalid_images = []
+    if train_all.classes != CLASSES:
+        raise ValueError(f"Urutan kelas tidak sesuai.\nSeharusnya: {CLASSES}\nDitemukan: {train_all.classes}")
 
-for class_name in CLASSES:
-    class_path = DATA_DIR / class_name
+    targets = np.array(train_all.targets)
+    train_idx, val_idx = train_test_split(
+        np.arange(len(targets)), test_size=val_ratio,
+        random_state=seed, stratify=targets)
 
-    for image_path in sorted(class_path.rglob("*")):
-        if not image_path.is_file():
-            continue
+    train_ds, val_ds = Subset(train_all, train_idx), Subset(val_all, val_idx)
+    pin = torch.cuda.is_available()
+    train_loader = DataLoader(train_ds, batch_size, shuffle=True,
+                              num_workers=num_workers, pin_memory=pin)
+    val_loader = DataLoader(val_ds, batch_size, shuffle=False,
+                            num_workers=num_workers, pin_memory=pin)
 
-        if image_path.suffix.lower() not in valid_extensions:
-            continue
+    counts = np.bincount(targets[train_idx], minlength=len(CLASSES))
+    if np.any(counts == 0):
+        raise ValueError("Ada kelas tanpa gambar pada data training.")
+    weights = len(train_idx) / (len(CLASSES) * counts)
+    class_weights = torch.tensor(weights, dtype=torch.float32)
 
-        try:
-            with Image.open(image_path) as img:
-                img.verify()
-            valid_images.append(image_path)
-        except Exception:
-            invalid_images.append(image_path)
+    if verbose:
+        print(f"Gambar valid: {len(valid)} | rusak: {len(invalid)}")
+        print(f"Train: {len(train_ds)} | Validasi: {len(val_ds)}")
+        for i, name in enumerate(CLASSES):
+            print(f"  {name:<15} train={counts[i]}")
+        print("Class weights:", [round(float(w), 3) for w in weights])
 
-if not valid_images:
-    raise ValueError("Tidak ditemukan gambar valid di dataset.")
+    return {
+        "train_loader": train_loader,
+        "val_loader": val_loader,
+        "class_weights": class_weights,
+        "class_counts": counts,
+        "val_samples": [val_all.samples[i] for i in val_idx],  # [(path, label), ...]
+    }
 
-print("Gambar valid :", len(valid_images))
-print("Gambar rusak :", len(invalid_images))
 
-# 6. MEMBUAT DATASET
-# Dataset training dan validation memakai transformasi berbeda.
+def export_val_folder(val_samples, dst):
+    """Salin gambar validasi ke dst/<kelas>/ agar bisa diuji dengan evaluate.py:
+        python evaluate.py --submission ./submission --data <dst>
+    """
+    dst = Path(dst)
+    if dst.exists():
+        print(f"[export] {dst} sudah ada, dilewati")
+        return
+    for path, label in val_samples:
+        out = dst / CLASSES[label]
+        out.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, out / Path(path).name)
+    print(f"[export] {len(val_samples)} gambar validasi disalin ke {dst}")
 
-train_dataset_all = datasets.ImageFolder(
-    root=DATA_DIR,
-    transform=train_transform
-)
 
-val_dataset_all = datasets.ImageFolder(
-    root=DATA_DIR,
-    transform=val_transform
-)
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--data", required=True, help="folder train/ (5 folder kelas)")
+    ap.add_argument("--export-val", help="salin gambar validasi ke folder ini untuk evaluate.py")
+    ap.add_argument("--workers", type=int, default=NUM_WORKERS)
+    a = ap.parse_args()
 
-class_names = train_dataset_all.classes
-
-if class_names != CLASSES:
-    raise ValueError(
-        f"Urutan kelas tidak sesuai.\n"
-        f"Seharusnya: {CLASSES}\n"
-        f"Ditemukan: {class_names}"
-    )
-
-# Gunakan hanya gambar yang lolos pemeriksaan.
-valid_image_paths = {str(p.resolve()) for p in valid_images}
-
-valid_indices = [
-    i for i, (path, label) in enumerate(train_dataset_all.samples)
-    if str(Path(path).resolve()) in valid_image_paths
-]
-
-labels = np.array([
-    train_dataset_all.targets[i] for i in valid_indices
-])
-
-# 7. SPLIT TRAIN DAN VALIDATION
-train_indices, val_indices = train_test_split(
-    valid_indices,
-    test_size=1 - TRAIN_RATIO,
-    random_state=SEED,
-    stratify=labels
-)
-
-train_dataset = Subset(train_dataset_all, train_indices)
-val_dataset = Subset(val_dataset_all, val_indices)
-
-# 8. DATA LOADER
-train_loader = DataLoader(
-    train_dataset,
-    batch_size=BATCH_SIZE,
-    shuffle=True,
-    num_workers=NUM_WORKERS,
-    pin_memory=torch.cuda.is_available(),
-    drop_last=False
-)
-
-val_loader = DataLoader(
-    val_dataset,
-    batch_size=BATCH_SIZE,
-    shuffle=False,
-    num_workers=NUM_WORKERS,
-    pin_memory=torch.cuda.is_available(),
-    drop_last=False
-)
-
-# 9. CLASS WEIGHTS
-train_labels = np.array([
-    train_dataset_all.targets[i] for i in train_indices
-])
-
-class_counts = np.bincount(
-    train_labels,
-    minlength=len(class_names)
-)
-
-if np.any(class_counts == 0):
-    raise ValueError(
-        "Ada kelas yang tidak memiliki gambar pada data training."
-    )
-
-weights = len(train_labels) / (
-    len(class_names) * class_counts
-)
-
-class_weights = torch.tensor(
-    weights, dtype=torch.float32
-)
-
-# 10. HASIL PEMBACAAN DATA
-print("\n" + "=" * 55)
-print("DATA READERS BERHASIL")
-print("=" * 55)
-
-print("Lokasi dataset :", DATA_DIR)
-print("Nama kelas     :", class_names)
-print("Total gambar   :", len(valid_indices))
-print("Data training  :", len(train_dataset))
-print("Data validation:", len(val_dataset))
-print("Batch training :", len(train_loader))
-print("Batch validasi :", len(val_loader))
-print("\nJumlah gambar per kelas pada training:")
-
-for i, name in enumerate(class_names):
-    print(f"{name}: {class_counts[i]} gambar")
-
-print("\nClass weights:", class_weights)
-print("Device:", "CUDA" if torch.cuda.is_available() else "CPU")
-
-# 11. UJI SATU BATCH
-images, labels = next(iter(train_loader))
-
-print("\nPemeriksaan batch:")
-print("Bentuk gambar:", images.shape)
-print("Bentuk label :", labels.shape)
-print("Label contoh :", labels[:10].tolist())
-print("\nSemua data siap digunakan untuk training!")
+    data = get_data(a.data, num_workers=a.workers)
+    images, labels = next(iter(data["train_loader"]))
+    print("Batch train:", tuple(images.shape), "label:", labels[:8].tolist())
+    images, labels = next(iter(data["val_loader"]))
+    print("Batch val  :", tuple(images.shape), "label:", labels[:8].tolist())
+    if a.export_val:
+        export_val_folder(data["val_samples"], a.export_val)
+    print("OK: datareaders berfungsi")
