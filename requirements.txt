@@ -2,6 +2,7 @@ torch
 torchvision
 timm
 pillow
+pandas
 numpy
 scikit-learn
 matplotlib
