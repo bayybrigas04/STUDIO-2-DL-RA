@@ -18,8 +18,6 @@ from sklearn.model_selection import StratifiedGroupKFold, StratifiedShuffleSplit
 from torch.utils.data import DataLoader, Dataset
 from torchvision import models, transforms as T
 
-# [REVISI] ukuran gambar, normalisasi, dan transform validasi diambil dari submission/model.py,
-# supaya preprocessing saat training SAMA dengan yang dipakai evaluate.py.
 from submission.model import IMG_SIZE, MEAN, STD, get_transform
 
 CLASSES = ["botol_plastik", "gelas_plastik", "kertas_kardus", "saset_kemasan", "styrofoam"]
