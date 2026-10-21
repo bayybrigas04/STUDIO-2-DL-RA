@@ -1,13 +1,3 @@
-"""Submission Studio 2 - Klasifikasi Sampah.
-
-Arsitektur: ResNet-50 dengan head 5 kelas.
-
-Kontrak (dipanggil oleh evaluate.py):
-  - get_model(): hanya MEMBANGUN arsitektur (tanpa mengunduh bobot, tanpa memuat model.pth).
-  - get_transform(): transform validasi, HARUS sama dengan yang dipakai saat training.
-  - Output: logits [batch, 5], urutan kelas (alfabetis, sama dengan ImageFolder):
-      0 botol_plastik, 1 gelas_plastik, 2 kertas_kardus, 3 saset_kemasan, 4 styrofoam
-"""
 import torch.nn as nn
 from torchvision import models, transforms
 
