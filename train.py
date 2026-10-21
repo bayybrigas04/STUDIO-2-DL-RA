@@ -96,6 +96,7 @@ def train(args):
     data = get_data(
         args.data, batch_size=args.batch_size,
         num_workers=args.num_workers, seed=args.seed,
+        csv_path=args.csv, group_col=args.group_col,
     )
     train_loader, val_loader = data["train_loader"], data["val_loader"]
     class_weights = data["class_weights"].to(device)
@@ -207,6 +208,8 @@ def train(args):
 def main():
     parser = argparse.ArgumentParser(description="Training ConvNeXt-Tiny Studio 2")
     parser.add_argument("--data", default="./train", help="Dataset dengan lima folder kelas")
+    parser.add_argument("--csv", default="", help="train_sources.csv untuk group split; kosong = split acak")
+    parser.add_argument("--group-col", default="page_url", help="Kolom CSV yang dipakai sebagai grup sumber")
     parser.add_argument("--out-dir", default="./submission", help="Folder output berisi model.pth")
     parser.add_argument("--export-val", default="./my_val", help="Ekspor data validasi untuk evaluate.py; kosongkan untuk menonaktifkan")
     parser.add_argument("--epochs", type=int, default=15)
@@ -228,6 +231,8 @@ def main():
     # IMG_SIZE ditetapkan di submission/model.py agar transform train/validasi/evaluate konsisten.
     if args.img_size != IMG_SIZE:
         parser.error(f"--img-size={args.img_size} tidak cocok dengan submission/model.py IMG_SIZE={IMG_SIZE}")
+    if args.csv == "":
+        args.csv = None
     if args.export_val == "":
         args.export_val = None
     train(args)
