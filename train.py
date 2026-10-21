@@ -1,15 +1,3 @@
-"""
-Skrip Pelatihan Studio 2 — Klasifikasi Sampah (Khusus ConvNeXt-Tiny).
-
-Pipeline:
-  - Arsitektur: ConvNeXt-Tiny pretrained ImageNet
-  - Stratified Group Split berbasis train_sources.csv
-  - Augmentasi: TrivialAugmentWide + RandomResizedCrop + RandomErasing + CutMix
-  - AdamW (lr=2e-4, wd=0.01) + Warmup (1 epoch) + Cosine Annealing
-  - Differential LR: Head (model.classifier[-1]) 10x lebih besar dari backbone
-  - Tracking Macro-F1 & otomatis simpan FP16 (< 60 MB) ke submission/model.pth
-"""
-
 import argparse
 import math
 import random
@@ -21,9 +9,10 @@ import torch
 import torch.nn as nn
 from sklearn.metrics import f1_score
 from torchvision import models
+from torchvision import transforms as T
 
-from datareaders import CLASSES, get_data, export_val_folder
-from submission.model import get_model
+from datareaders import get_data, export_val_folder
+from submission.model import IMG_SIZE, MEAN, STD, get_model
 
 
 def set_seed(seed):
@@ -46,6 +35,18 @@ def load_pretrained_backbone(model):
         print("Parameter baru/tidak dimuat (normalnya classifier):", result.missing_keys)
     if result.unexpected_keys:
         print("Parameter pretrained yang tidak digunakan:", result.unexpected_keys)
+
+
+def build_train_transform(crop_min, erase_p):
+    """Augmentasi khusus training. Ukuran output & normalisasi sama dengan submission/model.py."""
+    return T.Compose([
+        T.RandomResizedCrop(IMG_SIZE, scale=(crop_min, 1.0)),
+        T.RandomHorizontalFlip(p=0.5),
+        T.TrivialAugmentWide(),
+        T.ToTensor(),
+        T.Normalize(MEAN, STD),
+        T.RandomErasing(p=erase_p),
+    ])
 
 
 def cutmix(images, labels):
@@ -77,6 +78,13 @@ def evaluate_loader(model, loader, device, use_amp):
     return macro_f1, accuracy
 
 
+def verify_checkpoint(model_path):
+    """Pastikan model.pth cocok dengan submission/model.py (strict=True, seperti evaluate.py)."""
+    state = torch.load(model_path, map_location="cpu", weights_only=True)
+    get_model().load_state_dict(state, strict=True)
+    print("Verifikasi OK: model.pth cocok dengan submission/model.py (strict=True).")
+
+
 def train(args):
     set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -86,12 +94,15 @@ def train(args):
     output_dir = Path(args.out_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     data = get_data(
-        args.data, csv_path=args.csv, batch_size=args.batch_size,
-        num_workers=args.num_workers, seed=args.seed, n_folds=args.n_folds,
-        crop_min=args.crop_min, erase_p=args.erase_p,
+        args.data, batch_size=args.batch_size,
+        num_workers=args.num_workers, seed=args.seed,
     )
     train_loader, val_loader = data["train_loader"], data["val_loader"]
     class_weights = data["class_weights"].to(device)
+
+    # get_data() memakai augmentasi sederhana untuk train; ganti dengan augmentasi
+    # kita. Train & validasi adalah dua ImageFolder terpisah, jadi validasi tidak terpengaruh.
+    train_loader.dataset.dataset.transform = build_train_transform(args.crop_min, args.erase_p)
 
     model = get_model()
     if args.pretrained:
@@ -177,6 +188,7 @@ def train(args):
     fp32_mb = sum(v.numel() * 4 for v in best_state.values() if v.is_floating_point()) / 1e6
     save_state = best_state
     if fp32_mb > 95:
+        print(f"Ukuran FP32 {fp32_mb:.1f} MB > 95 MB -> disimpan sebagai FP16.")
         save_state = {k: (v.half() if v.is_floating_point() else v)
                       for k, v in best_state.items()}
     torch.save(save_state, model_path)
@@ -184,6 +196,8 @@ def train(args):
     print(f"\nBest Macro-F1: {best_f1:.4f} | epoch: {best_epoch}")
     print(f"Waktu training: {elapsed:.1f} menit")
     print(f"Checkpoint: {model_path} ({model_path.stat().st_size / 1e6:.1f} MB)")
+
+    verify_checkpoint(model_path)
 
     if args.export_val:
         export_val_folder(data["val_samples"], args.export_val)
@@ -193,7 +207,6 @@ def train(args):
 def main():
     parser = argparse.ArgumentParser(description="Training ConvNeXt-Tiny Studio 2")
     parser.add_argument("--data", default="./train", help="Dataset dengan lima folder kelas")
-    parser.add_argument("--csv", default="./train_sources.csv", help="CSV sumber gambar; gunakan '' untuk menonaktifkan")
     parser.add_argument("--out-dir", default="./submission", help="Folder output berisi model.pth")
     parser.add_argument("--export-val", default="./my_val", help="Ekspor data validasi untuk evaluate.py; kosongkan untuk menonaktifkan")
     parser.add_argument("--epochs", type=int, default=15)
@@ -201,12 +214,11 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--head-lr-mult", type=float, default=10.0)
     parser.add_argument("--weight-decay", type=float, default=0.05)
-    parser.add_argument("--img-size", type=int, default=256, help="Harus cocok dengan submission/model.py")
+    parser.add_argument("--img-size", type=int, default=IMG_SIZE, help="Harus cocok dengan submission/model.py")
     parser.add_argument("--cutmix-prob", type=float, default=0.5)
-    parser.add_argument("--crop-min", type=float, default=0.4)
-    parser.add_argument("--erase-p", type=float, default=0.25)
+    parser.add_argument("--crop-min", type=float, default=0.4, help="Skala minimum RandomResizedCrop")
+    parser.add_argument("--erase-p", type=float, default=0.25, help="Probabilitas RandomErasing")
     parser.add_argument("--label-smoothing", type=float, default=0.1)
-    parser.add_argument("--n-folds", type=int, default=7)
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--pretrained", action=argparse.BooleanOptionalAction, default=True)
@@ -214,11 +226,8 @@ def main():
     args = parser.parse_args()
 
     # IMG_SIZE ditetapkan di submission/model.py agar transform train/validasi/evaluate konsisten.
-    from submission.model import IMG_SIZE
     if args.img_size != IMG_SIZE:
         parser.error(f"--img-size={args.img_size} tidak cocok dengan submission/model.py IMG_SIZE={IMG_SIZE}")
-    if args.csv == "":
-        args.csv = None
     if args.export_val == "":
         args.export_val = None
     train(args)
