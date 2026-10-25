@@ -1,11 +1,3 @@
-"""Data pipeline Studio 2 - Klasifikasi Sampah (ConvNeXt-Tiny).
-
-- Membaca 5 folder kelas, membuang gambar rusak.
-- Split train/validasi: StratifiedGroupKFold berdasarkan train_sources.csv (page_url sebagai grup),
-  sehingga gambar dari halaman sumber yang sama tidak terbagi ke train dan validasi sekaligus.
-- Validasi memakai get_transform() dari submission/model.py (sama dengan evaluate.py).
-- all_data=True: validasi digabung ke train (untuk model final). Skor validasi lalu TIDAK independen.
-"""
 import argparse
 import random
 import shutil
@@ -22,20 +14,20 @@ from torchvision import transforms as T
 from submission.model import IMG_SIZE, MEAN, STD, get_transform
 
 CLASSES = ["botol_plastik", "gelas_plastik", "kertas_kardus", "saset_kemasan", "styrofoam"]
+CLASS_TO_IDX = {name: i for i, name in enumerate(CLASSES)}
 EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
-SEED = 42          # seed urutan data, augmentasi, dan CutMix
-SPLIT_SEED = 42    # seed split train/validasi (dipisah dari SEED agar validasi sama untuk semua seed)
+SEED = 42
+SPLIT_SEED = 42  # terpisah dari SEED agar split validasi sama untuk semua seed
 BATCH_SIZE = 32
 NUM_WORKERS = 2
-N_FOLDS = 7        # 1 fold = validasi (sekitar 1/7 data)
+N_FOLDS = 7
 
 
 def set_seed(seed=SEED):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+    torch.cuda.manual_seed_all(seed)
 
 
 def get_train_transform(crop_min=0.4, erase_p=0.25):
@@ -51,20 +43,19 @@ def get_train_transform(crop_min=0.4, erase_p=0.25):
 
 class WasteDataset(Dataset):
     def __init__(self, frame, transform=None):
-        self.frame = frame.reset_index(drop=True)
+        self.paths = frame["path"].tolist()
+        self.labels = frame["label"].map(CLASS_TO_IDX).tolist()
         self.transform = transform
-        self.label_to_idx = {name: i for i, name in enumerate(CLASSES)}
 
     def __len__(self):
-        return len(self.frame)
+        return len(self.paths)
 
     def __getitem__(self, index):
-        row = self.frame.iloc[index]
-        with Image.open(row["path"]) as img:
+        with Image.open(self.paths[index]) as img:
             image = img.convert("RGB")
         if self.transform:
             image = self.transform(image)
-        return image, self.label_to_idx[row["label"]]
+        return image, self.labels[index]
 
 
 def scan_dataset(data_dir):
@@ -72,7 +63,7 @@ def scan_dataset(data_dir):
     if not data_dir.is_dir():
         raise FileNotFoundError(f"Folder dataset tidak ditemukan: {data_dir}")
 
-    records, bad = [], []
+    records, n_bad = [], 0
     for cls in CLASSES:
         class_dir = data_dir / cls
         if not class_dir.is_dir():
@@ -83,14 +74,15 @@ def scan_dataset(data_dir):
             try:
                 with Image.open(p) as im:
                     im.verify()
-                records.append((cls, p.name, str(p.resolve())))
-            except Exception as exc:
-                bad.append((str(p), str(exc)))
+            except Exception:
+                n_bad += 1
+                continue
+            records.append((cls, p.name, str(p.resolve())))
 
     if not records:
         raise ValueError(f"Tidak ada gambar valid di {data_dir}")
     frame = pd.DataFrame(records, columns=["label", "name", "path"])
-    print(f"Gambar valid: {len(frame)} | rusak: {len(bad)}")
+    print(f"Gambar valid: {len(frame)} | rusak: {n_bad}")
     return frame
 
 
@@ -106,13 +98,12 @@ def split_dataset(frame, csv_path=None, seed=SPLIT_SEED, n_folds=N_FOLDS):
         source = source[["name", "page_url"]].drop_duplicates("name")
         frame = frame.merge(source, on="name", how="left")
         frame["group"] = frame["page_url"].fillna(frame["name"])
-        matched = int(frame["page_url"].notna().sum())
-        print(f"CSV sumber: {csv_file} | cocok: {matched}/{len(frame)}")
+        print(f"CSV sumber: {csv_file} | cocok: {frame['page_url'].notna().sum()}/{len(frame)}")
     else:
         frame["group"] = frame["name"]
         print("train_sources.csv tidak ditemukan; memakai stratified split berdasarkan nama file.")
 
-    y = frame["label"].map({name: i for i, name in enumerate(CLASSES)}).to_numpy()
+    y = frame["label"].map(CLASS_TO_IDX).to_numpy()
     if frame["group"].nunique() < len(frame):
         splitter = StratifiedGroupKFold(n_splits=n_folds, shuffle=True, random_state=seed)
         train_idx, val_idx = next(splitter.split(frame, y, groups=frame["group"]))
@@ -120,20 +111,20 @@ def split_dataset(frame, csv_path=None, seed=SPLIT_SEED, n_folds=N_FOLDS):
         splitter = StratifiedShuffleSplit(n_splits=1, test_size=1.0 / n_folds, random_state=seed)
         train_idx, val_idx = next(splitter.split(frame, y))
 
-    train_frame = frame.iloc[train_idx].drop(columns=["page_url", "group"], errors="ignore").reset_index(drop=True)
-    val_frame = frame.iloc[val_idx].drop(columns=["page_url", "group"], errors="ignore").reset_index(drop=True)
+    extra = ["page_url", "group"]
+    train_frame = frame.iloc[train_idx].drop(columns=extra, errors="ignore").reset_index(drop=True)
+    val_frame = frame.iloc[val_idx].drop(columns=extra, errors="ignore").reset_index(drop=True)
     return train_frame, val_frame
 
 
 def class_weights_from(frame):
     """Bobot kelas akar-terbalik, dinormalisasi ke rata-rata 1."""
-    labels = frame["label"].map({name: i for i, name in enumerate(CLASSES)}).to_numpy()
+    labels = frame["label"].map(CLASS_TO_IDX).to_numpy()
     counts = np.bincount(labels, minlength=len(CLASSES))
     if np.any(counts == 0):
         raise ValueError("Ada kelas yang tidak memiliki gambar pada data training.")
     weights = np.sqrt(counts.sum() / counts)
-    weights = weights / weights.mean()
-    return counts, weights
+    return counts, weights / weights.mean()
 
 
 def get_data(data_dir, csv_path=None, batch_size=BATCH_SIZE, num_workers=NUM_WORKERS,
@@ -151,18 +142,16 @@ def get_data(data_dir, csv_path=None, batch_size=BATCH_SIZE, num_workers=NUM_WOR
     train_ds = WasteDataset(train_frame, get_train_transform(crop_min, erase_p))
     val_ds = WasteDataset(val_frame, get_transform())
 
-    pin = torch.cuda.is_available()
-    train_loader = DataLoader(
-        train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers,
-        pin_memory=pin, drop_last=True, persistent_workers=num_workers > 0
+    loader_args = dict(
+        batch_size=batch_size,
+        num_workers=num_workers,
+        pin_memory=torch.cuda.is_available(),
+        persistent_workers=num_workers > 0,
     )
-    val_loader = DataLoader(
-        val_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers,
-        pin_memory=pin, persistent_workers=num_workers > 0
-    )
+    train_loader = DataLoader(train_ds, shuffle=True, drop_last=True, **loader_args)
+    val_loader = DataLoader(val_ds, shuffle=False, **loader_args)
 
     counts, weights = class_weights_from(train_frame)
-    class_weights = torch.tensor(weights, dtype=torch.float32)
 
     if verbose:
         print(f"Train: {len(train_ds)} | Validasi: {len(val_ds)}")
@@ -170,20 +159,18 @@ def get_data(data_dir, csv_path=None, batch_size=BATCH_SIZE, num_workers=NUM_WOR
             print(f"  {name:<15} train={counts[i]}")
         print("Class weights:", [round(float(w), 3) for w in weights])
 
-    val_samples = [(row["path"], CLASSES.index(row["label"])) for _, row in val_frame.iterrows()]
     return {
         "train_loader": train_loader,
         "val_loader": val_loader,
-        "class_weights": class_weights,
+        "class_weights": torch.tensor(weights, dtype=torch.float32),
         "class_counts": counts,
-        "val_samples": val_samples,
+        "val_samples": list(zip(val_frame["path"].tolist(), val_ds.labels)),
         "train_frame": train_frame,
         "val_frame": val_frame,
     }
 
 
 def export_val_folder(val_samples, dst):
-    """Ekspor split validasi ke folder per kelas untuk menjalankan evaluate.py."""
     dst = Path(dst)
     if dst.exists():
         shutil.rmtree(dst)
