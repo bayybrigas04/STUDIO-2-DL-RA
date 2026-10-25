@@ -1,4 +1,4 @@
-"""Skrip Pelatihan Studio 2 — ConvNeXt-Tiny.
+"""Skrip Pelatihan Studio 2 — ConvNeXt-Tiny VERSI TUNING.
 
 Pipeline:
   - Arsitektur: ConvNeXt-Tiny pretrained ImageNet
@@ -8,7 +8,6 @@ Pipeline:
   - Differential LR: Head (model.classifier[-1]) 10x lebih besar dari backbone
   - Tracking Macro-F1 & otomatis simpan FP16 (< 60 MB) ke submission/model.pth
 """
-
 import argparse
 import json
 import math
@@ -174,7 +173,6 @@ def train(args):
     out_dir = Path(args.out_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. Pindai dan split dataset
     df = scan_dataset(data_dir)
     train_df, val_df = split_dataset(df, csv_path=args.csv, seed=args.split_seed)
     print(f"Train data: {len(train_df)} | Val data: {len(val_df)}")
@@ -182,7 +180,7 @@ def train(args):
         train_df = pd.concat([train_df, val_df]).reset_index(drop=True)
         print(f"[ALL-DATA] validasi ikut dilatih -> Train data: {len(train_df)} (skor val tidak lagi independen, ambil epoch terakhir)")
 
-    # 2. Transformasi gambar
+
     train_tf = T.Compose([
         T.RandomResizedCrop(args.img_size, scale=(args.crop_min, 1.0), ratio=(0.75, 1.333)),
         T.RandomHorizontalFlip(),
@@ -210,21 +208,21 @@ def train(args):
         num_workers=args.num_workers, pin_memory=use_amp
     )
 
-    # Class weights
+ 
     targets = [train_ds.label_map[l] for l in train_df["label"]]
     counts = np.bincount(targets, minlength=len(CLASSES))
     cw = (counts.sum() / counts) ** 0.5
     class_weights = torch.tensor(cw / cw.mean(), dtype=torch.float32).to(device)
 
-    # 3. Model ConvNeXt-Tiny & Optimizer
+
     print(f"\nMembangun model: ConvNeXt-Tiny (lr: {args.lr}, wd: {args.weight_decay})...")
     if args.init_seed >= 0:
-        torch.manual_seed(args.init_seed)   # inisialisasi head sama di semua seed (syarat rata-rata bobot)
+        torch.manual_seed(args.init_seed)   
     model = create_model(num_classes=len(CLASSES), pretrained=not args.no_pretrained, drop_path=args.drop_path).to(device)
     ema = EMA(model, args.ema) if args.ema > 0 else None
     eval_model = create_model(num_classes=len(CLASSES), pretrained=False, drop_path=args.drop_path).to(device) if ema else model
     if args.init_seed >= 0:
-        set_seed(args.seed)                 # urutan data dan augmentasi tetap ditentukan --seed
+        set_seed(args.seed)                 
 
     head = get_head(model)
     head_ids = {id(p) for p in head.parameters()}
@@ -247,7 +245,7 @@ def train(args):
     criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=args.label_smoothing)
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
-    # 4. Training Loop
+
     print("\n" + "=" * 60)
     print(f"MULAI PELATIHAN ({args.epochs} Epochs)")
     print("=" * 60)
@@ -305,7 +303,6 @@ def train(args):
     print(f"Best Macro-F1: {best_f1:.4f} pada Epoch {best_epoch}")
     print("=" * 60)
 
-    # 5. Simpan Checkpoint (otomatis FP16 jika > 95 MB agar < 60 MB)
     model_pth = out_dir / "model.pth"
     fp32_mb = sum(v.numel() * 4 for v in best_state.values() if v.is_floating_point()) / 1e6
     save_state = {k: (v.half() if v.is_floating_point() else v) for k, v in best_state.items()} if fp32_mb > 95 else best_state

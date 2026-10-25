@@ -1,5 +1,11 @@
-"""Data pipeline Studio 2 - Klasifikasi Sampah (ConvNeXt-Tiny)."""
+"""Data pipeline Studio 2 - Klasifikasi Sampah (ConvNeXt-Tiny).
 
+- Membaca 5 folder kelas, membuang gambar rusak.
+- Split train/validasi: StratifiedGroupKFold berdasarkan train_sources.csv (page_url sebagai grup),
+  sehingga gambar dari halaman sumber yang sama tidak terbagi ke train dan validasi sekaligus.
+- Validasi memakai get_transform() dari submission/model.py (sama dengan evaluate.py).
+- all_data=True: validasi digabung ke train (untuk model final). Skor validasi lalu TIDAK independen.
+"""
 import argparse
 import random
 import shutil
